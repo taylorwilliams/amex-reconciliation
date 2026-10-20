@@ -1,0 +1,235 @@
+{
+  "version": 2,
+  "people": [
+    {
+      "name": "Alex",
+      "cardholder_names": [
+        "ALEX SAMPLE"
+      ]
+    },
+    {
+      "name": "Sam",
+      "cardholder_names": [
+        "SAM SAMPLE"
+      ]
+    }
+  ],
+  "next_id": 15,
+  "statements": [
+    {
+      "id": 1,
+      "label": "Demo · September 2026",
+      "start": "2026-09-06",
+      "end": "2026-10-05",
+      "due": "2026-10-30",
+      "previous": 0,
+      "new_debits": 121450,
+      "new_credits": 35250,
+      "closing": 86200,
+      "source": null,
+      "digest": "demo",
+      "warnings": []
+    }
+  ],
+  "transactions": [
+    {
+      "id": 2,
+      "statement_id": 1,
+      "fingerprint": "demo-2",
+      "date": "2026-09-08",
+      "processed": "2026-09-08",
+      "merchant": "Waitrose · weekly shop",
+      "amount": 8540,
+      "cardholder": "SAM SAMPLE",
+      "kind": "Purchase",
+      "split": "Joint",
+      "custom_person_two": 0,
+      "note": "",
+      "receipt": null,
+      "expense": false
+    },
+    {
+      "id": 3,
+      "statement_id": 1,
+      "fingerprint": "demo-3",
+      "date": "2026-09-10",
+      "processed": "2026-09-10",
+      "merchant": "The Italian Kitchen",
+      "amount": 7260,
+      "cardholder": "ALEX SAMPLE",
+      "kind": "Purchase",
+      "split": "Joint",
+      "custom_person_two": 0,
+      "note": "",
+      "receipt": null,
+      "expense": false
+    },
+    {
+      "id": 4,
+      "statement_id": 1,
+      "fingerprint": "demo-4",
+      "date": "2026-09-12",
+      "processed": "2026-09-12",
+      "merchant": "Trainline",
+      "amount": 4250,
+      "cardholder": "ALEX SAMPLE",
+      "kind": "Purchase",
+      "split": "PersonOne",
+      "custom_person_two": 0,
+      "note": "",
+      "receipt": null,
+      "expense": true
+    },
+    {
+      "id": 5,
+      "statement_id": 1,
+      "fingerprint": "demo-5",
+      "date": "2026-09-14",
+      "processed": "2026-09-14",
+      "merchant": "Boots",
+      "amount": 2875,
+      "cardholder": "SAM SAMPLE",
+      "kind": "Purchase",
+      "split": "PersonTwo",
+      "custom_person_two": 0,
+      "note": "",
+      "receipt": null,
+      "expense": false
+    },
+    {
+      "id": 6,
+      "statement_id": 1,
+      "fingerprint": "demo-6",
+      "date": "2026-09-16",
+      "processed": "2026-09-16",
+      "merchant": "British Airways",
+      "amount": 64000,
+      "cardholder": "ALEX SAMPLE",
+      "kind": "Purchase",
+      "split": "Joint",
+      "custom_person_two": 0,
+      "note": "",
+      "receipt": null,
+      "expense": false
+    },
+    {
+      "id": 7,
+      "statement_id": 1,
+      "fingerprint": "demo-7",
+      "date": "2026-09-20",
+      "processed": "2026-09-20",
+      "merchant": "John Lewis · return",
+      "amount": -5250,
+      "cardholder": "SAM SAMPLE",
+      "kind": "Refund",
+      "split": "Joint",
+      "custom_person_two": 0,
+      "note": "",
+      "receipt": null,
+      "expense": false
+    },
+    {
+      "id": 8,
+      "statement_id": 1,
+      "fingerprint": "demo-8",
+      "date": "2026-09-21",
+      "processed": "2026-09-21",
+      "merchant": "Apple",
+      "amount": 14900,
+      "cardholder": "ALEX SAMPLE",
+      "kind": "Purchase",
+      "split": "PersonOne",
+      "custom_person_two": 0,
+      "note": "",
+      "receipt": null,
+      "expense": false
+    },
+    {
+      "id": 9,
+      "statement_id": 1,
+      "fingerprint": "demo-9",
+      "date": "2026-09-24",
+      "processed": "2026-09-24",
+      "merchant": "Sainsbury's",
+      "amount": 6835,
+      "cardholder": "SAM SAMPLE",
+      "kind": "Purchase",
+      "split": "Joint",
+      "custom_person_two": 0,
+      "note": "",
+      "receipt": null,
+      "expense": false
+    },
+    {
+      "id": 10,
+      "statement_id": 1,
+      "fingerprint": "demo-10",
+      "date": "2026-09-26",
+      "processed": "2026-09-26",
+      "merchant": "Dishoom",
+      "amount": 9290,
+      "cardholder": "ALEX SAMPLE",
+      "kind": "Purchase",
+      "split": "Joint",
+      "custom_person_two": 0,
+      "note": "",
+      "receipt": null,
+      "expense": false
+    },
+    {
+      "id": 11,
+      "statement_id": 1,
+      "fingerprint": "demo-11",
+      "date": "2026-09-28",
+      "processed": "2026-09-28",
+      "merchant": "Coffee & Co",
+      "amount": 3500,
+      "cardholder": "SAM SAMPLE",
+      "kind": "Purchase",
+      "split": "PersonTwo",
+      "custom_person_two": 0,
+      "note": "",
+      "receipt": null,
+      "expense": false
+    }
+  ],
+  "payments": [
+    {
+      "id": 12,
+      "statement_id": 1,
+      "fingerprint": null,
+      "date": "2026-09-25",
+      "amount": 30000,
+      "split": "PersonOne",
+      "custom_person_two": 0,
+      "route": "Amex",
+      "note": "Statement payment",
+      "imported": true
+    },
+    {
+      "id": 13,
+      "statement_id": 1,
+      "fingerprint": null,
+      "date": "2026-10-20",
+      "amount": 10000,
+      "split": "PersonOne",
+      "custom_person_two": 0,
+      "route": "Amex",
+      "note": "",
+      "imported": false
+    },
+    {
+      "id": 14,
+      "statement_id": 1,
+      "fingerprint": null,
+      "date": "2026-10-20",
+      "amount": 15000,
+      "split": "PersonTwo",
+      "custom_person_two": 0,
+      "route": "Amex",
+      "note": "",
+      "imported": false
+    }
+  ],
+  "removed_statements": []
+}
