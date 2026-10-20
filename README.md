@@ -4,11 +4,11 @@ A desktop app for reconciling joint and personal spending on one Amex account. I
 
 ## Why this exists
 
-One card statement can contain three kinds of spending: joint purchases, one person's purchases and the other person's purchases. Refunds and payments then change what each person owes.
+I built Amex Together because I was finding it hard to work out what we each owed on our Amex account. Joint spending, personal purchases, refunds and payments were all mixed together.
 
-Doing this on paper means highlighting transactions, adding them up with a calculator and keeping separate notes of who has paid. It is easy to lose track when someone pays early, pays in parts or returns a purchase.
+I was going through paper statements with highlighters and a calculator, then keeping separate notes of who had paid what. I wanted a simple way to assign transactions quickly and have the calculations update as I went.
 
-Amex Together keeps those decisions and payments together. Assign each transaction once, record each contribution and check the remaining balances.
+Now I can see what we each still owe and keep a record of the transactions and payments, even after I've got rid of the paper.
 
 ## See what is owed
 
