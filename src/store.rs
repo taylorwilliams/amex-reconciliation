@@ -140,7 +140,7 @@ impl Store {
         });
         if p.previous != 0 {
             let tid = next.id();
-            next.transactions.push(Transaction { id: tid, statement_id: id, fingerprint: format!("opening-{id}"), date: p.start.clone(), processed: p.start.clone(), merchant: "Opening balance brought forward".into(), amount: p.previous, cardholder: "Opening balance".into(), kind: Kind::Opening, split: Split::Unassigned, custom_person_two: 0, note: "Assign the balance brought forward from the previous statement. Use a custom split for an exact share.".into(), receipt: None, expense: false });
+            next.transactions.push(Transaction { id: tid, statement_id: id, fingerprint: format!("opening-{id}"), date: p.start.clone(), processed: p.start.clone(), merchant: "Opening balance brought forward".into(), amount: p.previous, cardholder: "Opening balance".into(), kind: Kind::Opening, split: Split::Unassigned, custom_person_two: 0, note: "Balance owed before this statement. If this is your first statement, split it, or choose Settled if you had already sorted it out.".into(), receipt: None, expense: false, bucket: None });
         }
         for r in &p.records {
             let rid = next.id();
@@ -157,6 +157,7 @@ impl Store {
                     note: "Repayment found on your statement. Attribute the contribution below."
                         .into(),
                     imported: true,
+                    bucket: None,
                 });
             } else {
                 next.transactions.push(Transaction {
@@ -174,9 +175,11 @@ impl Store {
                     note: String::new(),
                     receipt: None,
                     expense: false,
+                    bucket: None,
                 });
             }
         }
+        next.apply_rules(Some(id));
         self.save(&next)?;
         *ledger = next;
         Ok(id)
@@ -255,7 +258,7 @@ pub fn seed_demo(ledger: &mut Ledger) {
         ),
         (
             "2026-09-24",
-            "Sainsbury's",
+            "Corner Grocer",
             6835,
             "SAM SAMPLE",
             Split::Joint,
@@ -289,6 +292,7 @@ pub fn seed_demo(ledger: &mut Ledger) {
             note: String::new(),
             receipt: None,
             expense: name == "Trainline",
+            bucket: None,
         });
     }
     let pid = ledger.id();
@@ -303,6 +307,7 @@ pub fn seed_demo(ledger: &mut Ledger) {
         route: Route::Amex,
         note: "Statement payment".into(),
         imported: true,
+        bucket: None,
     });
 }
 
@@ -341,6 +346,7 @@ mod tests {
                 route: Route::Amex,
                 note: "A separate payment".into(),
                 imported: false,
+                bucket: None,
             });
         }
         store.save(&ledger).unwrap();

@@ -24,6 +24,14 @@ Use the two name buttons for personal spending, or **Joint** for a 50/50 split. 
 
 The allocation filter shows purchases assigned only to that person. Their overview balance also includes their share of joint purchases. The Card filter shows which card was used; it does not decide who owes the money.
 
+## Use sub-options and auto-rules
+
+Use sub-options to group spending under one person or **Joint**. For example, add **Food shop** under Joint if you pay for food from a shared savings pot. Add sub-options in **Settings**. A transaction then shows its sub-options below the name buttons.
+
+The overview shows each sub-option's total. Each person's card shows their part of each sub-option and the amount left to pay themselves. Sub-options do not change the allocated share or the Amex balance.
+
+Auto-rules assign new statement spending by description. A rule matches when the description contains every keyword. Apostrophes and letter case are ignored. Rules run in order and the first match wins, so put specific rules first. For example, `grocer, fuel` assigned to one person goes before `grocer` assigned to Joint · Food shop. Rules never change an allocation you have already chosen. Use **Apply auto-rules** on the Transactions page to apply them to a statement you already imported.
+
 ## Record payments
 
 Attribute repayments found on a statement, or record an early or partial payment yourself. Separate payments can have the same date and amount. Transfers between the two people settle their contributions without reducing the Amex balance twice.
@@ -88,7 +96,9 @@ Re-importing the same file opens the saved statement and keeps your allocations.
 
 **All statements** shows the combined account history. It includes the earliest opening balance and each later transaction once. Later brought-forward balances are excluded because they repeat spending already in the history.
 
-A filtered statement shows that month's full opening balance and its own activity. If it is your earliest imported statement, assign any non-zero opening balance too. Removing earlier statements does not erase the opening balance printed on a statement you keep.
+A filtered statement includes that month's opening balance in its Amex balance. A later statement's brought-forward balance was assigned on the previous statement, so it does not appear as a transaction to assign.
+
+Your earliest imported statement shows its opening balance as a **starting balance**. Assign it like a purchase, or choose **Settled** if you had already sorted it out between you. A settled balance still counts towards the Amex balance but not towards either person's share. Mark the repayments that cleared it as **Not split · settled** too. Removing earlier statements does not erase the opening balance printed on a statement you keep.
 
 An early payment recorded against one statement can later appear on another. The combined overview matches these one-to-one by exact date and amount. Separate payments recorded against the same statement remain separate. Conflicting attributions are shown for review.
 

@@ -26,6 +26,7 @@ const GREEN: Color32 = Color32::from_rgb(112, 222, 188);
 const LINE: Color32 = Color32::from_rgb(34, 55, 85);
 const AMBER: Color32 = Color32::from_rgb(241, 195, 113);
 const RED: Color32 = Color32::from_rgb(255, 141, 151);
+const BUCKET: Color32 = Color32::from_rgb(22, 128, 104);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -51,9 +52,43 @@ impl Page {
 struct Editor {
     id: u64,
     split: Split,
+    bucket: Option<u64>,
     second_share: String,
     note: String,
     expense: bool,
+}
+
+#[derive(Clone)]
+struct RuleForm {
+    keywords: String,
+    split: Split,
+    bucket: Option<u64>,
+}
+
+struct SettingsForm {
+    people: [Person; 2],
+    buckets: Vec<Bucket>,
+    rules: Vec<RuleForm>,
+    next_id: u64,
+}
+
+impl SettingsForm {
+    fn new(ledger: &Ledger) -> Self {
+        Self {
+            people: ledger.people.clone(),
+            buckets: ledger.buckets.clone(),
+            rules: ledger
+                .rules
+                .iter()
+                .map(|r| RuleForm {
+                    keywords: r.keywords.join(", "),
+                    split: r.split,
+                    bucket: r.bucket,
+                })
+                .collect(),
+            next_id: ledger.next_id,
+        }
+    }
 }
 
 struct PaymentForm {
@@ -64,6 +99,7 @@ struct PaymentForm {
     split: Split,
     second_share: String,
     route: Route,
+    bucket: Option<u64>,
     note: String,
     error: String,
 }
@@ -78,6 +114,7 @@ impl Default for PaymentForm {
             split: Split::PersonOne,
             second_share: String::new(),
             route: Route::Amex,
+            bucket: None,
             note: String::new(),
             error: String::new(),
         }
@@ -107,7 +144,7 @@ pub struct App {
     message: Option<(String, bool, Instant)>,
     undo: Option<Ledger>,
     delete_payment: Option<u64>,
-    people_form: Option<[Person; 2]>,
+    people_form: Option<SettingsForm>,
     people_error: String,
 }
 
@@ -240,7 +277,22 @@ impl App {
         self.change(|l| {
             for t in &mut l.transactions {
                 if ids.contains(&t.id) {
+                    if t.split != split {
+                        t.bucket = None;
+                    }
                     t.split = split;
+                }
+            }
+        });
+        self.selected.clear();
+        self.editor = None;
+    }
+    fn set_bucket(&mut self, ids: &[u64], split: Split, bucket: Option<u64>) {
+        self.change(|l| {
+            for t in &mut l.transactions {
+                if ids.contains(&t.id) {
+                    t.split = split;
+                    t.bucket = bucket;
                 }
             }
         });
@@ -290,6 +342,7 @@ impl App {
             self.editor = Some(Editor {
                 id,
                 split: t.split,
+                bucket: t.bucket,
                 second_share: decimal(if t.split == Split::Custom {
                     t.custom_person_two
                 } else {
@@ -462,7 +515,7 @@ impl App {
                         )
                         .clicked()
                     {
-                        self.people_form = Some(self.ledger.people.clone());
+                        self.people_form = Some(SettingsForm::new(&self.ledger));
                         self.people_error.clear();
                     }
                     if ui
@@ -724,6 +777,12 @@ impl App {
             .and_then(|id| self.ledger.statement(id))
             .cloned()
             .or_else(|| latest.clone());
+        let buckets: Vec<(Bucket, BucketBalance)> = self
+            .ledger
+            .buckets
+            .iter()
+            .map(|b| (b.clone(), s.buckets.get(&b.id).copied().unwrap_or_default()))
+            .collect();
         let mut statements = self.ledger.statements.clone();
         statements.sort_by(|a, b| a.start.cmp(&b.start));
         egui::ScrollArea::vertical().id_salt(("overview", scope)).show(ui, |ui| {
@@ -749,9 +808,29 @@ impl App {
                 }); ui.add_space(16.0);
             }
             ui.columns(2, |cols| {
-                self.person_card(&mut cols[0], &names[0], 0, &s);
-                self.person_card(&mut cols[1], &names[1], 1, &s);
+                self.person_card(&mut cols[0], &names[0], 0, &s, &buckets);
+                self.person_card(&mut cols[1], &names[1], 1, &s, &buckets);
             });
+            if !buckets.is_empty() {
+                ui.add_space(18.0);
+                card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    eyebrow(ui, "SUB-OPTIONS");
+                    egui::Grid::new("bucket_summary").num_columns(4).spacing([24.0, 6.0]).show(ui, |ui| {
+                        for heading in ["", "SPENT", "PAID", "LEFT"] { eyebrow(ui, heading); }
+                        ui.end_row();
+                        for (bucket, balance) in &buckets {
+                            ui.label(format!("{} · {}", bucket.owner.label(&self.ledger.people), bucket.name));
+                            ui.label(money(balance.shares[0] + balance.shares[1]));
+                            ui.label(money(balance.paid[0] + balance.paid[1]));
+                            ui.label(RichText::new(money(balance.left(0) + balance.left(1))).strong());
+                            ui.end_row();
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("To pay towards a sub-option, record a payment and choose it under \"Paid towards\".").size(12.0).color(MUTED));
+                });
+            }
             ui.add_space(18.0);
             card().show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -816,7 +895,14 @@ impl App {
             }
         });
     }
-    fn person_card(&mut self, ui: &mut egui::Ui, name: &str, n: usize, s: &Summary) {
+    fn person_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        name: &str,
+        n: usize,
+        s: &Summary,
+        buckets: &[(Bucket, BucketBalance)],
+    ) {
         let background = ui.painter().add(egui::Shape::Noop);
         let response = Frame::new()
             .stroke(Stroke::new(1.0, Color32::from_rgb(48, 87, 135)))
@@ -862,26 +948,118 @@ impl App {
                         .color(Color32::WHITE),
                 );
                 ui.add_space(18.0);
-                ui.columns(2, |cols| {
-                    cols[0].label(RichText::new("Allocated share").size(11.0).color(PALE_BLUE));
-                    cols[0].label(
-                        RichText::new(money(s.shares[n]))
-                            .size(17.0)
-                            .strong()
-                            .color(Color32::WHITE),
-                    );
-                    cols[1].label(
-                        RichText::new("Already contributed")
-                            .size(11.0)
-                            .color(PALE_BLUE),
-                    );
-                    cols[1].label(
-                        RichText::new(money(s.contributions[n]))
-                            .size(17.0)
-                            .strong()
-                            .color(Color32::WHITE),
-                    );
-                });
+                let mine: Vec<_> = buckets
+                    .iter()
+                    .filter(|(_, b)| b.shares[n] != 0 || b.paid[n] != 0)
+                    .collect();
+                if mine.is_empty() {
+                    ui.columns(2, |cols| {
+                        cols[0].label(RichText::new("Allocated share").size(11.0).color(PALE_BLUE));
+                        cols[0].label(
+                            RichText::new(money(s.shares[n]))
+                                .size(17.0)
+                                .strong()
+                                .color(Color32::WHITE),
+                        );
+                        cols[1].label(
+                            RichText::new("Already contributed")
+                                .size(11.0)
+                                .color(PALE_BLUE),
+                        );
+                        cols[1].label(
+                            RichText::new(money(s.contributions[n]))
+                                .size(17.0)
+                                .strong()
+                                .color(Color32::WHITE),
+                        );
+                    });
+                } else {
+                    let general_share =
+                        s.shares[n] - mine.iter().map(|(_, b)| b.shares[n]).sum::<Pence>();
+                    let general_paid =
+                        s.contributions[n] - mine.iter().map(|(_, b)| b.paid[n]).sum::<Pence>();
+                    let mut rows: Vec<(String, Pence, Pence, Option<&Bucket>)> =
+                        vec![("General".into(), general_share, general_paid, None)];
+                    for (bucket, b) in &mine {
+                        let name = if bucket.owner == Split::Joint {
+                            format!("{} (half)", bucket.name)
+                        } else {
+                            bucket.name.clone()
+                        };
+                        rows.push((name, b.shares[n], b.paid[n], Some(bucket)));
+                    }
+                    let head = |ui: &mut egui::Ui, text: &str| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(text).size(10.0).strong().color(PALE_BLUE));
+                        });
+                    };
+                    let cell = |ui: &mut egui::Ui, value: Pence, strong: bool| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let text = RichText::new(money(value)).size(13.0).color(Color32::WHITE);
+                            ui.label(if strong { text.strong() } else { text });
+                        });
+                    };
+                    egui::Grid::new(("person_buckets", n))
+                        .num_columns(5)
+                        .spacing([14.0, 6.0])
+                        .min_col_width(70.0)
+                        .show(ui, |ui| {
+                            for heading in ["", "SHARE", "PAID", "LEFT", ""] {
+                                head(ui, heading);
+                            }
+                            ui.end_row();
+                            for (name, share, paid, bucket) in &rows {
+                                ui.label(RichText::new(name).size(12.0).color(PALE_BLUE));
+                                cell(ui, *share, false);
+                                cell(ui, *paid, false);
+                                cell(ui, share - paid, true);
+                                if let Some(bucket) = bucket {
+                                    let left = buckets
+                                        .iter()
+                                        .find(|(b, _)| b.id == bucket.id)
+                                        .map(|(_, b)| b.left(0) + b.left(1))
+                                        .unwrap_or(0);
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("Pay").size(12.0).strong(),
+                                            )
+                                            .fill(BUCKET)
+                                            .min_size(Vec2::new(52.0, 26.0)),
+                                        )
+                                        .on_hover_text(format!(
+                                            "Record a payment towards {}",
+                                            bucket.name
+                                        ))
+                                        .clicked()
+                                    {
+                                        self.payment_form = Some(PaymentForm {
+                                            statement_id: self.overview_statement.or_else(|| {
+                                                self.ledger.latest_statement().map(|s| s.id)
+                                            }),
+                                            split: bucket.owner,
+                                            bucket: Some(bucket.id),
+                                            amount: if left > 0 {
+                                                decimal(left)
+                                            } else {
+                                                String::new()
+                                            },
+                                            ..Default::default()
+                                        });
+                                    }
+                                } else {
+                                    ui.label("");
+                                }
+                                ui.end_row();
+                            }
+                            ui.label(RichText::new("Total").size(12.0).strong().color(PALE_BLUE));
+                            cell(ui, s.shares[n], true);
+                            cell(ui, s.contributions[n], true);
+                            cell(ui, s.remaining[n], true);
+                            ui.label("");
+                            ui.end_row();
+                        });
+                }
                 ui.add_space(20.0);
                 if ui
                     .add_sized(
@@ -941,112 +1119,223 @@ impl App {
             self.empty(ui);
             return;
         };
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text("Search merchant, cardholder or note…")
-                    .desired_width(265.0),
-            );
-            let filters = [
-                "All items".into(),
-                "Unassigned".into(),
-                "Joint".into(),
-                format!("{} only", self.ledger.people[0].name),
-                format!("{} only", self.ledger.people[1].name),
-                "Refunds".into(),
-                "To expense".into(),
-                "With receipt".into(),
-            ];
-            egui::ComboBox::from_id_salt("filter")
-                .selected_text(&filters[self.filter])
-                .show_ui(ui, |ui| {
-                    for (i, label) in filters.iter().enumerate() {
-                        ui.selectable_value(&mut self.filter, i, label);
-                    }
-                });
-            let owners: BTreeSet<_> = self
-                .ledger
-                .transactions
-                .iter()
-                .filter(|t| t.statement_id == id)
-                .map(|t| t.cardholder.clone())
-                .collect();
-            egui::ComboBox::from_id_salt("card")
-                .selected_text(&self.card_filter)
-                .width(150.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.card_filter, "All cards".into(), "All cards");
-                    for owner in owners {
-                        ui.selectable_value(
-                            &mut self.card_filter,
-                            owner.clone(),
-                            owner_label(&owner, &self.ledger.people),
-                        );
-                    }
-                });
-        });
-        ui.add_space(8.0);
-        let query = self.search.to_lowercase();
-        let rows: Vec<_> = self
+        let people = self.ledger.people.clone();
+        let buckets = self.ledger.buckets.clone();
+        // Filters: (label, accent). Bucket filters follow the fixed ones.
+        let mut filters: Vec<(String, Color32)> = vec![
+            ("All".into(), BLUE),
+            ("Unassigned".into(), AMBER),
+            (people[0].name.clone(), BLUE),
+            (people[1].name.clone(), BLUE),
+            ("Joint".into(), BLUE),
+        ];
+        filters.extend(buckets.iter().map(|b| (b.name.clone(), BUCKET)));
+        let fixed_tail = ["Refunds", "To expense", "With receipt"];
+        let tail_start = filters.len();
+        filters.extend(fixed_tail.iter().map(|l| (l.to_string(), BLUE)));
+        if self.filter >= filters.len() {
+            self.filter = 0;
+        }
+        let matches = |filter: usize, t: &Transaction| -> bool {
+            match filter {
+                0 => true,
+                1 => t.split == Split::Unassigned,
+                2 => t.split == Split::PersonOne,
+                3 => t.split == Split::PersonTwo,
+                4 => t.split == Split::Joint,
+                n if n >= tail_start => match n - tail_start {
+                    0 => t.kind == Kind::Refund,
+                    1 => t.expense,
+                    _ => t.receipt.is_some(),
+                },
+                n => buckets
+                    .get(n - 5)
+                    .is_some_and(|b| t.bucket == Some(b.id) && t.split == b.owner),
+            }
+        };
+        let owners: BTreeSet<_> = self
             .ledger
             .transactions
             .iter()
             .filter(|t| t.statement_id == id)
+            .map(|t| t.cardholder.clone())
+            .collect();
+
+        // Search, card and rules toolbar.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.add_sized(
+                [320.0, 34.0],
+                egui::TextEdit::singleline(&mut self.search)
+                    .hint_text("Search merchant, card member or note")
+                    .margin(Margin::symmetric(12, 8)),
+            );
+            if !self.search.is_empty() && ui.button("Clear").clicked() {
+                self.search.clear();
+            }
+            egui::ComboBox::from_id_salt("card")
+                .selected_text(if self.card_filter == "All cards" {
+                    "All cards".to_string()
+                } else {
+                    format!("Card: {}", owner_label(&self.card_filter, &people))
+                })
+                .width(170.0)
+                .height(300.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.card_filter, "All cards".into(), "All cards");
+                    for owner in &owners {
+                        ui.selectable_value(&mut self.card_filter, owner.clone(), owner_label(owner, &people));
+                    }
+                });
+            if !self.ledger.rules.is_empty() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(egui::Button::new("Apply auto-rules").min_size(Vec2::new(0.0, 34.0)))
+                        .on_hover_text("Assign unassigned items in this statement using your rules in Settings. Existing choices are kept.")
+                        .clicked()
+                    {
+                        let mut count = 0;
+                        self.change(|l| count = l.apply_rules(Some(id)));
+                        self.tell(format!("Auto-rules updated {count} transactions"), false);
+                    }
+                });
+            }
+        });
+        ui.add_space(12.0);
+
+        let query = self.search.to_lowercase();
+        let base: Vec<_> = self
+            .ledger
+            .transactions
+            .iter()
+            .filter(|t| t.statement_id == id)
+            .filter(|t| !self.ledger.is_carried_forward(t))
             .filter(|t| {
                 query.is_empty()
-                    || format!("{} {} {}", t.merchant, t.cardholder, t.note)
-                        .to_lowercase()
-                        .contains(&query)
+                    || format!(
+                        "{} {} {}",
+                        t.merchant,
+                        owner_label(&t.cardholder, &people),
+                        t.note
+                    )
+                    .to_lowercase()
+                    .contains(&query)
             })
             .filter(|t| self.card_filter == "All cards" || t.cardholder == self.card_filter)
-            .filter(|t| match self.filter {
-                1 => t.split == Split::Unassigned,
-                2 => t.split == Split::Joint,
-                3 => t.split == Split::PersonOne,
-                4 => t.split == Split::PersonTwo,
-                5 => t.kind == Kind::Refund,
-                6 => t.expense,
-                7 => t.receipt.is_some(),
-                _ => true,
-            })
             .cloned()
             .collect();
-        let visible_total: i64 = rows.iter().map(|t| t.amount).sum();
-        ui.horizontal(|ui| {
-            ui.set_min_height(30.0);
-            ui.label(
-                RichText::new(format!(
-                    "{} items · {} net",
-                    rows.len(),
-                    money(visible_total)
-                ))
-                .color(MUTED)
-                .size(12.0),
-            );
-            if ui.small_button("Select shown").clicked() {
-                self.selected.extend(rows.iter().map(|t| t.id));
-            }
-            if !self.selected.is_empty() {
-                ui.label(format!("{} selected", self.selected.len()));
-                for split in [
-                    Split::PersonOne,
-                    Split::PersonTwo,
-                    Split::Joint,
-                    Split::Unassigned,
-                ] {
-                    if ui.small_button(split.label(&self.ledger.people)).clicked() {
-                        let ids = self.selected.iter().copied().collect::<Vec<_>>();
-                        self.set_split(&ids, split);
-                    }
+
+        // One-click filter chips with live counts.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+            for (i, (label, accent)) in filters.iter().enumerate() {
+                if i == 5 || i == tail_start {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
                 }
-                if ui.small_button("Clear selection").clicked() {
-                    self.selected.clear();
+                let count = base.iter().filter(|t| matches(i, t)).count();
+                if i > 0 && count == 0 && self.filter != i && (i == 1 || i >= tail_start) {
+                    continue;
+                }
+                if filter_chip(ui, label, count, self.filter == i, *accent).clicked() {
+                    self.filter = i;
                 }
             }
         });
+        let rows: Vec<_> = base
+            .into_iter()
+            .filter(|t| matches(self.filter, t))
+            .collect();
+        let visible_total: i64 = rows.iter().map(|t| t.amount).sum();
+        let carried: Pence = self
+            .ledger
+            .transactions
+            .iter()
+            .filter(|t| t.statement_id == id && self.ledger.is_carried_forward(t))
+            .map(|t| t.amount)
+            .sum();
+        ui.add_space(10.0);
+
+        // Summary line, or a selection action bar.
+        let bar = if self.selected.is_empty() {
+            Frame::new().inner_margin(Margin::symmetric(4, 6))
+        } else {
+            Frame::new()
+                .fill(BLUE.gamma_multiply(0.18))
+                .stroke(Stroke::new(1.0, BLUE.gamma_multiply(0.6)))
+                .corner_radius(10)
+                .inner_margin(Margin::symmetric(12, 8))
+        };
+        bar.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.set_min_height(28.0);
+                if self.selected.is_empty() {
+                    ui.label(RichText::new(format!("{} items", rows.len())).strong());
+                    ui.label(RichText::new(format!("· {} net", money(visible_total))).color(MUTED));
+                    if carried != 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "· {} brought forward, already assigned on the previous statement",
+                                money(carried)
+                            ))
+                            .size(12.0)
+                            .color(MUTED),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !rows.is_empty() && ui.button("Select all shown").clicked() {
+                            self.selected.extend(rows.iter().map(|t| t.id));
+                        }
+                    });
+                } else {
+                    ui.label(RichText::new(format!("{} selected", self.selected.len())).strong());
+                    ui.add_space(6.0);
+                    let ids = self.selected.iter().copied().collect::<Vec<_>>();
+                    for (split, label) in [
+                        (Split::PersonOne, people[0].name.as_str()),
+                        (Split::PersonTwo, people[1].name.as_str()),
+                        (Split::Joint, "Joint"),
+                    ] {
+                        if share_button(ui, label, 56.0, false, BLUE).clicked() {
+                            self.set_bucket(&ids, split, None);
+                        }
+                    }
+                    for b in &buckets {
+                        if share_button(ui, &b.name, bucket_button_width(&b.name), false, BUCKET)
+                            .on_hover_text(format!("{} · {}", b.owner.label(&people), b.name))
+                            .clicked()
+                        {
+                            self.set_bucket(&ids, b.owner, Some(b.id));
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.selected.clear();
+                        }
+                        if ui.button("Unassign").clicked() {
+                            self.set_bucket(&ids, Split::Unassigned, None);
+                        }
+                    });
+                }
+            });
+        });
         ui.add_space(8.0);
-        let mut action: Option<(u64, Split)> = None;
+        let mut bucket_action: Option<(u64, Split, Option<u64>)> = None;
         let mut open = None;
+        let share_width = 236.0
+            + if self.ledger.buckets.is_empty() {
+                0.0
+            } else {
+                14.0
+            }
+            + self
+                .ledger
+                .buckets
+                .iter()
+                .map(|b| bucket_button_width(&b.name) + 5.0)
+                .sum::<f32>();
         TableBuilder::new(ui)
             .id_salt(("transactions", id))
             .striped(true)
@@ -1056,7 +1345,7 @@ impl App {
             .column(Column::remainder().at_least(160.0).clip(true))
             .column(Column::exact(75.0).clip(true))
             .column(Column::exact(95.0).clip(true))
-            .column(Column::exact(208.0).clip(true))
+            .column(Column::exact(share_width).clip(true))
             .header(30.0, |mut row| {
                 for name in ["", "DATE", "TRANSACTION", "CARD", "AMOUNT", "WHOSE SHARE?"] {
                     row.col(|ui| {
@@ -1104,7 +1393,7 @@ impl App {
                                 labels.push("REFUND");
                             }
                             if t.kind == Kind::Opening {
-                                labels.push("BALANCE BROUGHT FORWARD");
+                                labels.push("STARTING BALANCE · FROM BEFORE YOUR FIRST STATEMENT");
                             }
                             if t.receipt.is_some() {
                                 labels.push("RECEIPT");
@@ -1140,26 +1429,17 @@ impl App {
                         ui.spacing_mut().item_spacing.x = 5.0;
                         ui.spacing_mut().button_padding = Vec2::new(7.0, 5.0);
                         ui.horizontal(|ui| {
+                            let has_bucket = self
+                                .ledger
+                                .bucket(t.bucket)
+                                .is_some_and(|b| b.owner == t.split);
                             for (split, label) in [
                                 (Split::PersonOne, self.ledger.people[0].name.as_str()),
                                 (Split::PersonTwo, self.ledger.people[1].name.as_str()),
                                 (Split::Joint, "Joint"),
                             ] {
-                                let active = t.split == split;
-                                if ui
-                                    .add_sized(
-                                        [46.0, 28.0],
-                                        egui::Button::new(
-                                            RichText::new(label).size(11.0).color(if active {
-                                                Color32::WHITE
-                                            } else {
-                                                INK
-                                            }),
-                                        )
-                                        .fill(if active { BLUE } else { ELEVATED })
-                                        .min_size(Vec2::new(46.0, 28.0))
-                                        .truncate(),
-                                    )
+                                let active = t.split == split && !has_bucket;
+                                if share_button(ui, label, 46.0, active, BLUE)
                                     .on_hover_text(if active {
                                         "Click again to leave unassigned"
                                     } else {
@@ -1167,15 +1447,60 @@ impl App {
                                     })
                                     .clicked()
                                 {
-                                    action = Some((
-                                        t.id,
-                                        if active { Split::Unassigned } else { split },
-                                    ));
+                                    bucket_action = Some(if active {
+                                        (t.id, Split::Unassigned, None)
+                                    } else {
+                                        (t.id, split, None)
+                                    });
                                 }
                             }
-                            if ui
-                                .small_button("…")
-                                .on_hover_text(t.split.label(&self.ledger.people))
+                            if t.kind == Kind::Opening {
+                                ui.add_space(2.0);
+                                ui.separator();
+                                ui.add_space(2.0);
+                                let active = t.split == Split::Settled;
+                                if share_button(ui, "Settled", 64.0, active, BUCKET)
+                                    .on_hover_text("Already sorted out before you started: counts towards the Amex balance, not either share")
+                                    .clicked()
+                                {
+                                    bucket_action = Some(if active { (t.id, Split::Unassigned, None) } else { (t.id, Split::Settled, None) });
+                                }
+                            } else {
+                            if !self.ledger.buckets.is_empty() {
+                                ui.add_space(2.0);
+                                ui.separator();
+                                ui.add_space(2.0);
+                            }
+                            for b in &self.ledger.buckets {
+                                let active = t.bucket == Some(b.id) && t.split == b.owner;
+                                if share_button(
+                                    ui,
+                                    &b.name,
+                                    bucket_button_width(&b.name),
+                                    active,
+                                    BUCKET,
+                                )
+                                .on_hover_text(if active {
+                                    "Click again to remove this sub-option".to_string()
+                                } else {
+                                    format!(
+                                        "Assign to {} · {}",
+                                        b.owner.label(&self.ledger.people),
+                                        b.name
+                                    )
+                                })
+                                .clicked()
+                                {
+                                    bucket_action = Some(if active {
+                                        (t.id, t.split, None)
+                                    } else {
+                                        (t.id, b.owner, Some(b.id))
+                                    });
+                                }
+                            }
+                            }
+                            if share_button(ui, "Details", 58.0, false, LINE)
+                                .on_hover_text("Note, receipt, custom split")
                                 .clicked()
                             {
                                 open = Some(t.id);
@@ -1184,8 +1509,8 @@ impl App {
                     });
                 });
             });
-        if let Some((id, split)) = action {
-            self.set_split(&[id], split);
+        if let Some((id, split, bucket)) = bucket_action {
+            self.set_bucket(&[id], split, bucket);
         }
         if let Some(id) = open {
             self.open_editor(id);
@@ -1207,41 +1532,132 @@ impl App {
             return;
         };
         let mut close = false;
-        egui::Window::new("Transaction details").anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).default_width(340.0).resizable(false).collapsible(false).frame(card()).show(ui.ctx(), |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.horizontal(|ui| { eyebrow(ui, "TRANSACTION DETAILS"); if ui.small_button("Close").clicked() { close = true; } });
-                ui.add_space(12.0); ui.label(RichText::new(&t.merchant).size(19.0).strong());
-                ui.label(RichText::new(money(t.amount)).size(28.0).color(if t.amount < 0 { GREEN } else { INK }));
-                ui.label(RichText::new(format!("{} · {}", short_date(&t.date), owner_label(&t.cardholder, &self.ledger.people))).color(MUTED));
-                ui.add_space(16.0); ui.separator();
-                if t.kind == Kind::Refund { ui.label(RichText::new("This refund reduces the assigned share. For a custom split, enter a negative amount for the second person's credit.").color(GREEN)); }
-                ui.label("Allocate to"); split_combo(ui, "detail_split", &mut editor.split, &self.ledger.people);
-                if editor.split == Split::Custom { ui.label(format!("{}'s share (£)", self.ledger.people[1].name)); ui.text_edit_singleline(&mut editor.second_share); ui.label(RichText::new(format!("{} receives the remainder.", self.ledger.people[0].name)).size(12.0).color(MUTED)); }
-                ui.add_space(10.0); ui.checkbox(&mut editor.expense, "To expense later");
-                ui.label("Note"); ui.add(egui::TextEdit::multiline(&mut editor.note).desired_rows(3).desired_width(f32::INFINITY));
-                if primary(ui, "Save details").clicked() {
-                    let custom = if editor.split == Split::Custom { parse_money(&editor.second_share).and_then(|a| { validate_custom(t.amount, a)?; Ok(a) }) } else { Ok(0) };
-                    match custom { Ok(second_share) => {
-                        let e = editor.clone(); self.change(|l| if let Some(t) = l.transactions.iter_mut().find(|t| t.id == e.id) { t.split = e.split; t.custom_person_two = second_share; t.note = e.note; t.expense = e.expense; }); close = true;
-                    }, Err(e) => self.tell(e.to_string(), true) }
-                }
-                ui.add_space(16.0); ui.separator(); ui.label(RichText::new("Receipt").strong());
-                if let Some(path) = &t.receipt {
-                    ui.label(RichText::new("Saved with this transaction").color(GREEN));
-                    if ui.button("Open receipt").clicked() { open_path(&PathBuf::from(path)); }
-                    if ui.button("Save a copy…").clicked() && let Some(dest) = rfd::FileDialog::new().set_file_name(PathBuf::from(path).file_name().unwrap().to_string_lossy()).save_file()
-                        && let Err(e) = std::fs::copy(path, dest) { self.tell(e.to_string(), true); }
-                } else { ui.label(RichText::new("No receipt attached. That's fine.").size(12.0).color(MUTED)); }
-                if ui.button(if t.receipt.is_some() { "Replace receipt…" } else { "Attach photo or PDF…" }).clicked()
-                    && let Some(file) = rfd::FileDialog::new().add_filter("Receipt", &["jpg", "jpeg", "png", "heic", "pdf", "webp"]).pick_file() {
-                        let key = format!("{}-{}", t.id, chrono::Local::now().timestamp_millis());
-                        match self.store.copy_attachment(&file, "receipts", &key) {
-                            Ok(path) => self.change(|l| if let Some(t) = l.transactions.iter_mut().find(|x| x.id == t.id) { t.receipt = Some(path); }),
-                            Err(e) => self.tell(e.to_string(), true),
+        let mut save = false;
+        let people = self.ledger.people.clone();
+        let buckets = self.ledger.buckets.clone();
+        let max_height = ui.ctx().content_rect().height() - 220.0;
+        let modal = egui::Modal::new(egui::Id::new("transaction_details"))
+            .frame(card().inner_margin(24))
+            .show(ui.ctx(), |ui| {
+                ui.set_width(560.0);
+                ui.horizontal(|ui| {
+                    eyebrow(ui, if t.kind == Kind::Refund { "REFUND" } else if t.kind == Kind::Opening { "STARTING BALANCE" } else { "TRANSACTION" });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() { close = true; }
+                    });
+                });
+                ui.label(RichText::new(&t.merchant).size(22.0).strong());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(money(t.amount)).size(30.0).strong().color(if t.amount < 0 { GREEN } else { INK }));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{} · {}", short_date(&t.date), owner_label(&t.cardholder, &people))).color(MUTED));
+                    });
+                });
+                ui.add_space(14.0);
+                egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
+                    settings_section(ui, "WHOSE SHARE?", if t.kind == Kind::Refund { "This refund reduces the share it is assigned to. For a custom split, enter a negative amount for the second person's credit." } else { "Click a choice again to leave this unassigned." }, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                            let has_bucket = buckets.iter().any(|b| Some(b.id) == editor.bucket && b.owner == editor.split);
+                            for (split, label) in [
+                                (Split::PersonOne, people[0].name.as_str()),
+                                (Split::PersonTwo, people[1].name.as_str()),
+                                (Split::Joint, "Joint · 50/50"),
+                                (Split::Custom, "Custom split"),
+                                (Split::Settled, "Not split · settled"),
+                            ]
+                            .into_iter()
+                            .filter(|(split, _)| *split != Split::Settled || t.kind == Kind::Opening)
+                            {
+                                let active = editor.split == split && !has_bucket;
+                                if share_button(ui, label, 92.0, active, BLUE).clicked() {
+                                    editor.split = if active { Split::Unassigned } else { split };
+                                    editor.bucket = None;
+                                }
+                            }
+                            });
+                            if !buckets.is_empty() {
+                            field_label(ui, "Sub-option");
+                            ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                            for b in &buckets {
+                                let active = editor.bucket == Some(b.id) && editor.split == b.owner;
+                                if share_button(ui, &b.name, bucket_button_width(&b.name).max(92.0), active, BUCKET)
+                                    .on_hover_text(format!("{} · {}", b.owner.label(&people), b.name))
+                                    .clicked()
+                                {
+                                    if active { editor.bucket = None; } else { editor.split = b.owner; editor.bucket = Some(b.id); }
+                                }
+                            }
+                        });
+                            }
+                        if editor.split == Split::Custom {
+                            ui.add_space(8.0);
+                            field_label(ui, &format!("{}'s share (£). {} receives the remainder.", people[1].name, people[0].name));
+                            ui.add(egui::TextEdit::singleline(&mut editor.second_share).margin(Margin::symmetric(8, 6)).desired_width(180.0));
                         }
-                }
+                    });
+                    settings_section(ui, "NOTES", "Add context for later, or flag it to claim back.", |ui| {
+                        ui.checkbox(&mut editor.expense, "To expense later");
+                        ui.add_space(6.0);
+                        ui.add(egui::TextEdit::multiline(&mut editor.note).hint_text("Note").margin(Margin::symmetric(8, 6)).desired_rows(3).desired_width(f32::INFINITY));
+                    });
+                    settings_section(ui, "RECEIPT", if t.receipt.is_some() { "A copy is saved with this transaction." } else { "Optional. Attach a photo or PDF." }, |ui| {
+                        ui.horizontal(|ui| {
+                            if let Some(path) = &t.receipt {
+                                if ui.button("Open receipt").clicked() { open_path(&PathBuf::from(path)); }
+                                if ui.button("Save a copy…").clicked() && let Some(dest) = rfd::FileDialog::new().set_file_name(PathBuf::from(path).file_name().unwrap().to_string_lossy()).save_file()
+                                    && let Err(e) = std::fs::copy(path, dest) { self.tell(e.to_string(), true); }
+                            }
+                            if ui.button(if t.receipt.is_some() { "Replace…" } else { "Attach photo or PDF…" }).clicked()
+                                && let Some(file) = rfd::FileDialog::new().add_filter("Receipt", &["jpg", "jpeg", "png", "heic", "pdf", "webp"]).pick_file() {
+                                let key = format!("{}-{}", t.id, chrono::Local::now().timestamp_millis());
+                                match self.store.copy_attachment(&file, "receipts", &key) {
+                                    Ok(path) => self.change(|l| if let Some(t) = l.transactions.iter_mut().find(|x| x.id == t.id) { t.receipt = Some(path); }),
+                                    Err(e) => self.tell(e.to_string(), true),
+                                }
+                            }
+                        });
+                    });
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if primary(ui, "Save details").clicked() { save = true; }
+                        if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(0.0, 36.0))).clicked() { close = true; }
+                    });
+                });
             });
-        });
+        if modal.should_close() {
+            close = true;
+        }
+        if save {
+            let custom = if editor.split == Split::Custom {
+                parse_money(&editor.second_share).and_then(|a| {
+                    validate_custom(t.amount, a)?;
+                    Ok(a)
+                })
+            } else {
+                Ok(0)
+            };
+            match custom {
+                Ok(second_share) => {
+                    let e = editor.clone();
+                    self.change(|l| {
+                        if let Some(t) = l.transactions.iter_mut().find(|t| t.id == e.id) {
+                            t.split = e.split;
+                            t.bucket = e.bucket;
+                            t.custom_person_two = second_share;
+                            t.note = e.note;
+                            t.expense = e.expense;
+                        }
+                    });
+                    close = true;
+                }
+                Err(e) => self.tell(e.to_string(), true),
+            }
+        }
         self.editor = if close { None } else { Some(editor) };
     }
 
@@ -1285,6 +1701,7 @@ impl App {
         });
         ui.add_space(12.0);
         let mut assign = None;
+        let mut assign_bucket = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for p in &rows {
                 card().show(ui, |ui| {
@@ -1324,6 +1741,7 @@ impl App {
                                     split: p.split,
                                     second_share: decimal(p.custom_person_two),
                                     route: p.route,
+                                    bucket: p.bucket,
                                     note: p.note.clone(),
                                     error: String::new(),
                                 });
@@ -1338,6 +1756,7 @@ impl App {
                                             Split::PersonOne,
                                             Split::PersonTwo,
                                             Split::Joint,
+                                            Split::Settled,
                                         ] {
                                             ui.selectable_value(
                                                 &mut split,
@@ -1350,6 +1769,30 @@ impl App {
                                     assign = Some((p.id, split));
                                 }
                                 ui.label(RichText::new("Contribution:").color(MUTED));
+                                if !self.ledger.buckets.is_empty() {
+                                    let mut bucket = p.bucket;
+                                    egui::ComboBox::from_id_salt(("payment_bucket", p.id))
+                                        .selected_text(
+                                            self.ledger
+                                                .bucket(p.bucket)
+                                                .map(|b| b.name.as_str())
+                                                .unwrap_or("General"),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut bucket, None, "General");
+                                            for b in &self.ledger.buckets {
+                                                ui.selectable_value(
+                                                    &mut bucket,
+                                                    Some(b.id),
+                                                    &b.name,
+                                                );
+                                            }
+                                        });
+                                    if bucket != p.bucket {
+                                        assign_bucket = Some((p.id, bucket));
+                                    }
+                                    ui.label(RichText::new("Towards:").color(MUTED));
+                                }
                             }
                         });
                     });
@@ -1367,6 +1810,13 @@ impl App {
             self.change(|l| {
                 if let Some(p) = l.payments.iter_mut().find(|p| p.id == id) {
                     p.split = split;
+                }
+            });
+        }
+        if let Some((id, bucket)) = assign_bucket {
+            self.change(|l| {
+                if let Some(p) = l.payments.iter_mut().find(|p| p.id == id) {
+                    p.bucket = bucket;
                 }
             });
         }
@@ -1399,6 +1849,15 @@ impl App {
             });
             if f.route == Route::Amex {
                 ui.label("Whose contribution?"); split_combo(ui, "form_split", &mut f.split, &self.ledger.people);
+                if !self.ledger.buckets.is_empty() {
+                    ui.label("Paid towards");
+                    egui::ComboBox::from_id_salt("form_bucket").width(200.0)
+                        .selected_text(self.ledger.bucket(f.bucket).map(|b| b.name.as_str()).unwrap_or("General"))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut f.bucket, None, "General");
+                            for b in &self.ledger.buckets { ui.selectable_value(&mut f.bucket, Some(b.id), &b.name); }
+                        });
+                }
                 if f.split == Split::Custom { ui.label(format!("{} contributed (£)", self.ledger.people[1].name)); ui.text_edit_singleline(&mut f.second_share); ui.label(RichText::new(format!("The remainder is attributed to {}.", self.ledger.people[0].name)).size(12.0).color(MUTED)); }
             } else { ui.label(RichText::new("A transfer settles what you owe each other. It does not count as another payment to Amex.").size(12.0).color(MUTED)); }
             ui.label("Note (optional)"); ui.add(egui::TextEdit::multiline(&mut f.note).desired_rows(2).desired_width(f32::INFINITY));
@@ -1424,10 +1883,16 @@ impl App {
                     0
                 };
                 let sid = f.statement_id.context("Choose a statement first")?;
+                let bucket = if f.route == Route::Amex {
+                    f.bucket
+                } else {
+                    None
+                };
                 self.change(|l| {
                     if let Some(id) = f.id {
                         if let Some(p) = l.payments.iter_mut().find(|p| p.id == id) {
                             p.split = f.split;
+                            p.bucket = bucket;
                             p.custom_person_two = second_share;
                             p.note = f.note.clone();
                             if !p.imported {
@@ -1450,6 +1915,7 @@ impl App {
                             route: f.route,
                             note: f.note.clone(),
                             imported: false,
+                            bucket,
                         });
                     }
                 });
@@ -1466,35 +1932,127 @@ impl App {
     }
 
     fn people_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut people) = self.people_form.take() else {
+        let Some(mut form) = self.people_form.take() else {
             return;
         };
         let mut open = true;
         let mut save = false;
-        egui::Window::new("Settings").anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .open(&mut open).resizable(false).collapsible(false).default_width(520.0).show(ctx, |ui| {
-                ui.label("Set the names used on balances, buttons, transfers and exports.");
-                ui.label(RichText::new("Changing names keeps every existing allocation and payment attached to the same person.").color(MUTED).size(12.0));
-                ui.add_space(12.0);
-                for (index, person) in people.iter_mut().enumerate() {
-                    ui.push_id(index, |ui| {
-                        ui.label(RichText::new(format!("Person {}", index + 1)).strong());
-                        ui.label("Display name");
-                        ui.add(egui::TextEdit::singleline(&mut person.name).desired_width(f32::INFINITY));
-                        ui.label("Card member names on statements (optional, one per line)");
-                        let mut aliases = person.cardholder_names.join("\n");
-                        if ui.add(egui::TextEdit::multiline(&mut aliases).desired_rows(2).desired_width(f32::INFINITY)).changed() {
-                            person.cardholder_names = aliases.lines().map(str::to_owned).collect();
+        let max_height = ctx.content_rect().height() - 220.0;
+        let modal = egui::Modal::new(egui::Id::new("settings"))
+            .frame(card().inner_margin(24))
+            .show(ctx, |ui| {
+                ui.set_width(640.0);
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        eyebrow(ui, "SETTINGS");
+                        ui.label(RichText::new("People, sub-options and rules").size(20.0).strong());
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                        if ui.button("Close").clicked() {
+                            open = false;
                         }
                     });
-                    ui.add_space(12.0);
-                }
-                ui.label(RichText::new("Card member names shorten the Card column. They do not assign spending automatically. Keyboard shortcuts: 1, 2 and J for joint.").size(12.0).color(MUTED));
+                });
+                ui.add_space(14.0);
+                egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    settings_section(ui, "PEOPLE", "Names used on balances, buttons, transfers and exports. Renaming keeps every allocation and payment with the same person.", |ui| {
+                        ui.columns(2, |cols| {
+                            for (index, (col, person)) in cols.iter_mut().zip(form.people.iter_mut()).enumerate() {
+                                col.push_id(index, |ui| {
+                                    ui.label(RichText::new(format!("Person {}", index + 1)).size(12.0).strong().color(PALE_BLUE));
+                                    field_label(ui, "Display name");
+                                    ui.add(egui::TextEdit::singleline(&mut person.name).margin(Margin::symmetric(8, 6)).desired_width(f32::INFINITY));
+                                    field_label(ui, "Card member names (one per line)");
+                                    let mut aliases = person.cardholder_names.join("\n");
+                                    if ui.add(egui::TextEdit::multiline(&mut aliases).margin(Margin::symmetric(8, 6)).desired_rows(2).desired_width(f32::INFINITY)).changed() {
+                                        person.cardholder_names = aliases.lines().map(str::to_owned).collect();
+                                    }
+                                });
+                            }
+                        });
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Card member names only shorten the Card column. Shortcuts: 1, 2 and J.").size(11.0).color(MUTED));
+                    });
+                    let people = form.people.clone();
+                    settings_section(ui, "SUB-OPTIONS", "Group spending under a person or Joint, such as a food shop paid from savings. Each one is a one-click button on every transaction.", |ui| {
+                        let mut remove = None;
+                        if form.buckets.is_empty() {
+                            ui.label(RichText::new("No sub-options yet.").size(12.0).color(MUTED));
+                        }
+                        egui::Grid::new("buckets").num_columns(3).spacing([10.0, 8.0]).show(ui, |ui| {
+                            for (i, bucket) in form.buckets.iter_mut().enumerate() {
+                                ui.push_id(("bucket", bucket.id), |ui| {
+                                    ui.add_sized([240.0, 30.0], egui::TextEdit::singleline(&mut bucket.name).hint_text("Name").margin(Margin::symmetric(8, 6)));
+                                });
+                                ui.push_id(("bucket-owner", bucket.id), |ui| owner_combo(ui, "owner", &mut bucket.owner, &people));
+                                if ui.small_button("Remove").clicked() { remove = Some(i); }
+                                ui.end_row();
+                            }
+                        });
+                        if let Some(i) = remove {
+                            let id = form.buckets.remove(i).id;
+                            for rule in &mut form.rules { if rule.bucket == Some(id) { rule.bucket = None; } }
+                        }
+                        ui.add_space(4.0);
+                        if ui.button("+ Add sub-option").clicked() {
+                            let id = form.next_id; form.next_id += 1;
+                            form.buckets.push(Bucket { id, name: String::new(), owner: Split::Joint });
+                        }
+                    });
+                    let buckets = form.buckets.clone();
+                    settings_section(ui, "AUTO-RULES", "New statements are assigned automatically when the description contains every keyword. Commas separate keywords; case and apostrophes are ignored. The first matching rule wins.", |ui| {
+                        let (mut remove, mut raise) = (None, None);
+                        if form.rules.is_empty() {
+                            ui.label(RichText::new("No rules yet.").size(12.0).color(MUTED));
+                        } else {
+                            egui::Grid::new("rules").num_columns(4).spacing([10.0, 8.0]).show(ui, |ui| {
+                                for heading in ["DESCRIPTION CONTAINS", "ASSIGN TO", "SUB-OPTION", ""] { eyebrow(ui, heading); }
+                                ui.end_row();
+                                for (i, rule) in form.rules.iter_mut().enumerate() {
+                                    ui.push_id(("rule", i), |ui| {
+                                        ui.add_sized([200.0, 30.0], egui::TextEdit::singleline(&mut rule.keywords).hint_text("e.g. grocer, fuel").margin(Margin::symmetric(8, 6)));
+                                    });
+                                    ui.push_id(("rule-split", i), |ui| owner_combo(ui, "split", &mut rule.split, &people));
+                                    if rule.bucket.is_some_and(|id| !buckets.iter().any(|b| b.id == id && b.owner == rule.split)) { rule.bucket = None; }
+                                    ui.push_id(("rule-bucket", i), |ui| {
+                                        egui::ComboBox::from_id_salt("bucket").width(120.0)
+                                            .selected_text(buckets.iter().find(|b| Some(b.id) == rule.bucket).map(|b| b.name.as_str()).unwrap_or("None"))
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(&mut rule.bucket, None, "None");
+                                                for b in buckets.iter().filter(|b| b.owner == rule.split) { ui.selectable_value(&mut rule.bucket, Some(b.id), &b.name); }
+                                            });
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.add_enabled(i > 0, egui::Button::new("↑").small()).on_hover_text("Run earlier").clicked() { raise = Some(i); }
+                                        if ui.small_button("Remove").clicked() { remove = Some(i); }
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                        }
+                        if let Some(i) = raise { form.rules.swap(i - 1, i); }
+                        if let Some(i) = remove { form.rules.remove(i); }
+                        ui.add_space(4.0);
+                        if ui.button("+ Add rule").clicked() {
+                            form.rules.push(RuleForm { keywords: String::new(), split: Split::Joint, bucket: None });
+                        }
+                    });
+                });
+                ui.add_space(14.0);
                 if !self.people_error.is_empty() { ui.colored_label(RED, &self.people_error); }
-                if primary(ui, "Save settings").clicked() { save = true; }
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if primary(ui, "Save settings").clicked() { save = true; }
+                        if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(0.0, 36.0))).clicked() { open = false; }
+                    });
+                });
             });
+        if modal.should_close() {
+            open = false;
+        }
         if save {
-            for person in &mut people {
+            for person in &mut form.people {
                 person.name = person.name.trim().to_owned();
                 person.cardholder_names = person
                     .cardholder_names
@@ -1503,17 +2061,70 @@ impl App {
                     .filter(|name| !name.is_empty())
                     .collect();
             }
-            match validate_people(&people) {
+            for bucket in &mut form.buckets {
+                bucket.name = bucket.name.trim().to_owned();
+            }
+            let rules: Vec<Rule> = form
+                .rules
+                .iter()
+                .map(|r| Rule {
+                    keywords: r
+                        .keywords
+                        .split(',')
+                        .map(|k| k.trim().to_owned())
+                        .filter(|k| !k.is_empty())
+                        .collect(),
+                    split: r.split,
+                    bucket: r.bucket,
+                })
+                .filter(|r| !r.keywords.is_empty())
+                .collect();
+            let result = validate_people(&form.people).and_then(|()| {
+                if form
+                    .buckets
+                    .iter()
+                    .any(|b| b.name.is_empty() || b.name.chars().count() > 24)
+                {
+                    anyhow::bail!("Give each sub-option a name of 1 to 24 characters");
+                }
+                Ok(())
+            });
+            match result {
                 Ok(()) => {
-                    let updated = people.clone();
-                    self.change(|ledger| ledger.people = updated);
+                    let people = form.people.clone();
+                    let buckets = form.buckets.clone();
+                    let next_id = form.next_id;
+                    self.change(|ledger| {
+                        let removed: Vec<_> = ledger
+                            .buckets
+                            .iter()
+                            .filter(|b| !buckets.iter().any(|n| n.id == b.id))
+                            .map(|b| b.id)
+                            .collect();
+                        for id in removed {
+                            ledger.remove_bucket(id);
+                        }
+                        // A bucket moved to another owner no longer applies to items
+                        // allocated to the previous owner.
+                        for t in &mut ledger.transactions {
+                            if let Some(b) = buckets.iter().find(|b| Some(b.id) == t.bucket)
+                                && b.owner != t.split
+                            {
+                                t.bucket = None;
+                            }
+                        }
+                        ledger.people = people;
+                        ledger.buckets = buckets;
+                        ledger.rules = rules;
+                        ledger.next_id = ledger.next_id.max(next_id);
+                    });
                     open = false;
                 }
                 Err(error) => self.people_error = error.to_string(),
             }
         }
         if open {
-            self.people_form = Some(people);
+            self.people_form = Some(form);
         }
     }
 
@@ -1733,6 +2344,7 @@ impl App {
                     "Cardholder",
                     "Amount GBP",
                     "Allocation",
+                    "Sub-option",
                     &format!("{} share GBP", self.ledger.people[0].name),
                     &format!("{} share GBP", self.ledger.people[1].name),
                     "To expense",
@@ -1756,6 +2368,11 @@ impl App {
                         safe_csv(&t.cardholder),
                         decimal(t.amount),
                         t.split.label(&self.ledger.people).into(),
+                        self.ledger
+                            .bucket(t.bucket)
+                            .filter(|b| b.owner == t.split)
+                            .map(|b| safe_csv(&b.name))
+                            .unwrap_or_default(),
                         shares.map(|v| decimal(v[0])).unwrap_or_default(),
                         shares.map(|v| decimal(v[1])).unwrap_or_default(),
                         t.expense.to_string(),
@@ -2137,6 +2754,106 @@ fn split_combo(ui: &mut egui::Ui, id: &str, split: &mut Split, people: &[Person;
         .width(200.0)
         .show_ui(ui, |ui| {
             for s in Split::ALL {
+                ui.selectable_value(split, s, s.label(people));
+            }
+        });
+}
+fn filter_chip(
+    ui: &mut egui::Ui,
+    label: &str,
+    count: usize,
+    active: bool,
+    accent: Color32,
+) -> egui::Response {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        label,
+        0.0,
+        egui::TextFormat::simple(
+            FontId::proportional(12.0),
+            if active { Color32::WHITE } else { INK },
+        ),
+    );
+    job.append(
+        &format!("  {count}"),
+        0.0,
+        egui::TextFormat::simple(
+            FontId::proportional(11.0),
+            if active {
+                Color32::from_white_alpha(200)
+            } else {
+                MUTED
+            },
+        ),
+    );
+    ui.add(
+        egui::Button::new(job)
+            .fill(if active { accent } else { ELEVATED })
+            .stroke(Stroke::new(1.0, if active { accent } else { LINE }))
+            .corner_radius(14)
+            .min_size(Vec2::new(0.0, 28.0)),
+    )
+}
+fn share_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    width: f32,
+    active: bool,
+    accent: Color32,
+) -> egui::Response {
+    ui.add_sized(
+        [width, 28.0],
+        egui::Button::new(RichText::new(label).size(11.0).color(if active {
+            Color32::WHITE
+        } else {
+            INK
+        }))
+        .fill(if active { accent } else { ELEVATED })
+        .stroke(Stroke::new(
+            1.0,
+            if active {
+                accent
+            } else {
+                accent.gamma_multiply(0.35)
+            },
+        ))
+        .min_size(Vec2::new(width, 28.0))
+        .truncate(),
+    )
+}
+fn bucket_button_width(name: &str) -> f32 {
+    (name.chars().count() as f32 * 7.0 + 18.0).clamp(56.0, 110.0)
+}
+fn settings_section(
+    ui: &mut egui::Ui,
+    title: &str,
+    description: &str,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    Frame::new()
+        .fill(BG)
+        .stroke(Stroke::new(1.0, LINE))
+        .corner_radius(12)
+        .inner_margin(16)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            eyebrow(ui, title);
+            ui.label(RichText::new(description).size(12.0).color(MUTED));
+            ui.add_space(10.0);
+            content(ui);
+        });
+    ui.add_space(12.0);
+}
+fn field_label(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(text).size(11.0).color(MUTED));
+}
+fn owner_combo(ui: &mut egui::Ui, id: &str, split: &mut Split, people: &[Person; 2]) {
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(split.label(people))
+        .width(110.0)
+        .show_ui(ui, |ui| {
+            for s in Bucket::OWNERS {
                 ui.selectable_value(split, s, s.label(people));
             }
         });
