@@ -37,15 +37,19 @@ pub enum Split {
     PersonTwo,
     Joint,
     Custom,
+    /// Counts towards the Amex balance but neither person's share. For a
+    /// balance from before tracking began, and the repayments that cleared it.
+    Settled,
 }
 
 impl Split {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Unassigned,
         Self::PersonOne,
         Self::PersonTwo,
         Self::Joint,
         Self::Custom,
+        Self::Settled,
     ];
     pub fn label(self, people: &[Person; 2]) -> &str {
         match self {
@@ -54,6 +58,7 @@ impl Split {
             Self::PersonTwo => &people[1].name,
             Self::Joint => "Joint · 50/50",
             Self::Custom => "Custom split",
+            Self::Settled => "Not split · settled",
         }
     }
     /// The odd penny goes to the first person, consistently, for both charges and refunds.
@@ -64,6 +69,7 @@ impl Split {
             Self::PersonTwo => Some([0, amount]),
             Self::Joint => Some([amount - amount / 2, amount / 2]),
             Self::Custom => Some([amount - custom_person_two, custom_person_two]),
+            Self::Settled => Some([0, 0]),
         }
     }
 }
@@ -91,6 +97,56 @@ pub struct Transaction {
     pub note: String,
     pub receipt: Option<String>,
     pub expense: bool,
+    /// Optional sub-allocation, such as a joint food shop or spending paid
+    /// from a separate pot. Only meaningful while `split` matches the bucket owner.
+    #[serde(default)]
+    pub bucket: Option<u64>,
+}
+
+/// A named sub-option under one allocation, such as "Food shop" under Joint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bucket {
+    pub id: u64,
+    pub name: String,
+    pub owner: Split,
+}
+
+impl Bucket {
+    pub const OWNERS: [Split; 3] = [Split::PersonOne, Split::PersonTwo, Split::Joint];
+}
+
+/// Assigns new spending whose description contains every keyword. Rules run
+/// in order and the first match wins, so put specific rules first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rule {
+    pub keywords: Vec<String>,
+    pub split: Split,
+    #[serde(default)]
+    pub bucket: Option<u64>,
+}
+
+/// Uppercase and drop apostrophes, so "GROCER'S" and "GROCERS" match.
+pub fn normalise_merchant(text: &str) -> String {
+    text.to_uppercase()
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '’' | '‘'))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+impl Rule {
+    pub fn matches(&self, merchant: &str) -> bool {
+        let merchant = normalise_merchant(merchant);
+        let keywords: Vec<_> = self
+            .keywords
+            .iter()
+            .map(|k| normalise_merchant(k))
+            .filter(|k| !k.is_empty())
+            .collect();
+        !keywords.is_empty() && keywords.iter().all(|k| merchant.contains(k.as_str()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +183,10 @@ pub struct Payment {
     pub route: Route,
     pub note: String,
     pub imported: bool,
+    /// The sub-option this contribution pays towards, such as money moved
+    /// from a food shop savings pot. `None` is a general contribution.
+    #[serde(default)]
+    pub bucket: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +223,10 @@ pub struct Ledger {
     pub payments: Vec<Payment>,
     #[serde(default)]
     pub removed_statements: Vec<RemovedStatement>,
+    #[serde(default)]
+    pub buckets: Vec<Bucket>,
+    #[serde(default)]
+    pub rules: Vec<Rule>,
 }
 
 impl Default for Ledger {
@@ -175,6 +239,8 @@ impl Default for Ledger {
             transactions: vec![],
             payments: vec![],
             removed_statements: vec![],
+            buckets: vec![],
+            rules: vec![],
         }
     }
 }
@@ -190,6 +256,63 @@ impl Ledger {
     }
     pub fn latest_statement(&self) -> Option<&Statement> {
         self.statements.iter().max_by_key(|s| (&s.end, &s.start))
+    }
+    pub fn bucket(&self, id: Option<u64>) -> Option<&Bucket> {
+        id.and_then(|id| self.buckets.iter().find(|b| b.id == id))
+    }
+    pub fn buckets_for(&self, owner: Split) -> impl Iterator<Item = &Bucket> {
+        self.buckets.iter().filter(move |b| b.owner == owner)
+    }
+    /// Apply rules to purchases and refunds. Unassigned items take the rule's
+    /// allocation; items already allocated the same way only gain a missing
+    /// bucket. Manual choices are never overwritten. Returns the number changed.
+    pub fn apply_rules(&mut self, statement_id: Option<u64>) -> usize {
+        let mut changed = 0;
+        for t in &mut self.transactions {
+            if t.kind == Kind::Opening || statement_id.is_some_and(|id| t.statement_id != id) {
+                continue;
+            }
+            let Some(rule) = self.rules.iter().find(|r| r.matches(&t.merchant)) else {
+                continue;
+            };
+            let bucket = rule.bucket.filter(|id| {
+                self.buckets
+                    .iter()
+                    .any(|b| b.id == *id && b.owner == rule.split)
+            });
+            if t.split == Split::Unassigned {
+                t.split = rule.split;
+                t.bucket = bucket;
+                changed += 1;
+            } else if t.split == rule.split && t.bucket.is_none() && bucket.is_some() {
+                t.bucket = bucket;
+                changed += 1;
+            }
+        }
+        changed
+    }
+    pub fn remove_bucket(&mut self, id: u64) {
+        self.buckets.retain(|b| b.id != id);
+        let clear = |b: &mut Option<u64>| {
+            if *b == Some(id) {
+                *b = None;
+            }
+        };
+        self.transactions
+            .iter_mut()
+            .for_each(|t| clear(&mut t.bucket));
+        self.rules.iter_mut().for_each(|r| clear(&mut r.bucket));
+        self.payments.iter_mut().for_each(|p| clear(&mut p.bucket));
+        for removed in &mut self.removed_statements {
+            removed
+                .payments
+                .iter_mut()
+                .for_each(|p| clear(&mut p.bucket));
+            removed
+                .transactions
+                .iter_mut()
+                .for_each(|t| clear(&mut t.bucket));
+        }
     }
     pub fn remove_statement(&mut self, id: u64) -> Result<()> {
         let index = self
@@ -306,6 +429,9 @@ impl Ledger {
                 matched[i] = true;
                 account.matched_payments += 1;
                 let payment = &mut imported[i];
+                if payment.bucket.is_none() {
+                    payment.bucket = manual.bucket;
+                }
                 if payment.split == Split::Unassigned {
                     payment.split = manual.split;
                     payment.custom_person_two = manual.custom_person_two;
@@ -331,6 +457,16 @@ impl Ledger {
         account.summary.finish();
         account
     }
+    /// The earliest active statement's opening balance is the starting point
+    /// of the history. Later openings repeat the previous closing balance.
+    pub fn is_carried_forward(&self, t: &Transaction) -> bool {
+        t.kind == Kind::Opening
+            && self
+                .statements
+                .iter()
+                .min_by_key(|s| (&s.start, &s.end))
+                .is_some_and(|first| first.id != t.statement_id)
+    }
     pub fn summary(&self, statement_id: u64) -> Summary {
         let mut s = Summary::default();
         for t in self
@@ -338,7 +474,14 @@ impl Ledger {
             .iter()
             .filter(|t| t.statement_id == statement_id)
         {
-            s.add_transaction(t);
+            if self.is_carried_forward(t) {
+                // Already allocated on the previous statement: part of this
+                // statement's Amex balance, but not a new share to assign.
+                s.total += t.amount;
+                s.opening += t.amount;
+            } else {
+                s.add_transaction(t);
+            }
         }
         for p in self
             .payments
@@ -378,6 +521,21 @@ pub struct Summary {
     pub unassigned_payments: Pence,
     pub unassigned_payment_count: usize,
     pub review_required: bool,
+    /// Per sub-option: each person's share of its spending and what they
+    /// have paid towards it. Both are already included in the totals above.
+    pub buckets: std::collections::BTreeMap<u64, BucketBalance>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BucketBalance {
+    pub shares: [Pence; 2],
+    pub paid: [Pence; 2],
+}
+
+impl BucketBalance {
+    pub fn left(&self, person: usize) -> Pence {
+        self.shares[person] - self.paid[person]
+    }
 }
 
 impl Summary {
@@ -395,6 +553,12 @@ impl Summary {
             for (i, share) in shares.iter().enumerate() {
                 self.shares[i] += share;
             }
+            if let Some(bucket) = t.bucket {
+                let entry = self.buckets.entry(bucket).or_default();
+                for (i, share) in shares.iter().enumerate() {
+                    entry.shares[i] += share;
+                }
+            }
         } else {
             self.unassigned_spend += t.amount;
             self.unassigned_count += 1;
@@ -407,6 +571,12 @@ impl Summary {
                 if let Some(shares) = p.split.shares(p.amount, p.custom_person_two) {
                     for (i, share) in shares.iter().enumerate() {
                         self.contributions[i] += share;
+                    }
+                    if let Some(bucket) = p.bucket {
+                        let entry = self.buckets.entry(bucket).or_default();
+                        for (i, share) in shares.iter().enumerate() {
+                            entry.paid[i] += share;
+                        }
                     }
                 } else {
                     self.unassigned_payments += p.amount;
@@ -551,6 +721,7 @@ mod tests {
             note: String::new(),
             receipt: None,
             expense: false,
+            bucket: None,
         }
     }
     fn payment(amount: i64, split: Split, route: Route) -> Payment {
@@ -565,6 +736,7 @@ mod tests {
             route,
             note: String::new(),
             imported: false,
+            bucket: None,
         }
     }
     fn statement(id: u64, start: &str, end: &str, previous: Pence, closing: Pence) -> Statement {
@@ -623,7 +795,10 @@ mod tests {
         assert_eq!(account.summary.opening, 10000);
         assert_eq!(account.summary.refunds, 3000);
         assert!(account.summary.complete());
-        assert_eq!(ledger.summary(2).unassigned_count, 1); // The individual snapshot is unchanged.
+        // The carried-forward opening needs no allocation, but stays in the balance.
+        assert_eq!(ledger.summary(2).unassigned_count, 0);
+        assert_eq!(ledger.summary(2).opening, 22000);
+        assert_eq!(ledger.summary(2).shares, [-3000, 5000]);
         ledger.statements.reverse(); // Import order must not choose the starting balance.
         assert_eq!(ledger.account_summary().summary.remaining, [8000, 14000]);
         assert_eq!(ledger.latest_statement().unwrap().id, 2);
@@ -838,6 +1013,75 @@ mod tests {
         assert!(parse_money("1-2.34").is_err());
         assert!(parse_money("1,23.45").is_err());
         assert_eq!(money(-123456), "−£1,234.56");
+    }
+    #[test]
+    fn rules_assign_first_match_and_fill_missing_buckets_without_overriding() {
+        let mut fuel = transaction(4000, Split::Unassigned);
+        fuel.merchant = "CORNER GROCER'S FUEL STATION".into();
+        let mut online = transaction(9000, Split::Unassigned);
+        online.merchant = "CORNER GROCERS ONLINE".into();
+        let mut joint = transaction(3000, Split::Joint);
+        joint.merchant = "Corner Grocer's Market".into();
+        let mut manual = transaction(2000, Split::PersonTwo);
+        manual.merchant = "CORNER GROCER'S MARKET".into();
+        let mut opening = transaction(5000, Split::Unassigned);
+        opening.kind = Kind::Opening;
+        opening.merchant = "CORNER GROCERS".into();
+        let mut ledger = Ledger {
+            transactions: vec![fuel, online, joint, manual, opening],
+            buckets: vec![Bucket {
+                id: 7,
+                name: "Food shop".into(),
+                owner: Split::Joint,
+            }],
+            rules: vec![
+                Rule {
+                    keywords: vec!["corner grocer".into(), "fuel".into()],
+                    split: Split::PersonOne,
+                    bucket: None,
+                },
+                Rule {
+                    keywords: vec!["Corner Grocer's".into()],
+                    split: Split::Joint,
+                    bucket: Some(7),
+                },
+            ],
+            ..Ledger::default()
+        };
+        assert_eq!(ledger.apply_rules(None), 2 + 1);
+        let t = &ledger.transactions;
+        assert_eq!((t[0].split, t[0].bucket), (Split::PersonOne, None));
+        assert_eq!((t[1].split, t[1].bucket), (Split::Joint, Some(7)));
+        assert_eq!((t[2].split, t[2].bucket), (Split::Joint, Some(7)));
+        assert_eq!((t[3].split, t[3].bucket), (Split::PersonTwo, None));
+        assert_eq!(t[4].split, Split::Unassigned);
+        assert_eq!(ledger.apply_rules(None), 0);
+        let mut food = payment(5000, Split::Joint, Route::Amex);
+        food.bucket = Some(7);
+        ledger.payments.push(food);
+        let balance = ledger.summary(1).buckets[&7];
+        assert_eq!(balance.shares, [6000, 6000]);
+        assert_eq!(balance.paid, [2500, 2500]);
+        assert_eq!(balance.left(0), 3500);
+        ledger.remove_bucket(7);
+        assert!(ledger.transactions.iter().all(|t| t.bucket.is_none()));
+        assert!(ledger.payments.iter().all(|p| p.bucket.is_none()));
+        assert_eq!(ledger.rules[1].bucket, None);
+    }
+    #[test]
+    fn settled_starting_balance_and_its_repayment_are_not_anyones_share() {
+        let mut opening = transaction(10000, Split::Settled);
+        opening.kind = Kind::Opening;
+        let ledger = Ledger {
+            statements: vec![statement(1, "2026-10-01", "2026-10-31", 10000, 4000)],
+            transactions: vec![opening, transaction(4000, Split::Joint)],
+            payments: vec![payment(10000, Split::Settled, Route::Amex)],
+            ..Ledger::default()
+        };
+        let s = ledger.account_summary().summary;
+        assert_eq!(s.bank_remaining, 4000);
+        assert_eq!(s.remaining, [2000, 2000]);
+        assert!(s.complete());
     }
     #[test]
     fn custom_refund_must_be_within_signed_amount() {
